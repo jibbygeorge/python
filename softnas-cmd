@@ -1,0 +1,2277 @@
+#!/bin/bash
+
+TEMP_DIR=/tmp
+PROGNAME=$(basename $0)
+DEBUG=0
+SESSION_ID=$PPID
+TEMP_FILE=$TEMP_DIR/softnascmd.$PPID
+TEMP_DATAFILE=$TEMP_DIR/softnascmd.$PPID.data
+INSECURE=1
+RESULT=
+PRETTY_PRINT=0
+BASE_URL="https://localhost/softnas"
+
+function json_escape
+{
+  echo -n "$1" | python -c 'import json,sys; print json.dumps(sys.stdin.read())'
+}
+
+function usage 
+{
+
+	# Display usage message on standard error
+	echo "Usage: $PROGNAME file" 1>&2
+}
+
+function clean_up
+{
+
+	#####	
+	#	Function to remove temporary files and other housekeeping
+	#	No arguments
+	#####
+
+	rm -f ${TEMP_FILE}
+}
+
+
+function graceful_exit
+{
+	#####
+	#	Function called for a graceful exit
+	#	No arguments
+	#####
+	local output=$(echo $1  | sed -e 's/^\s*//g' -e 's/\s*$//g')
+	if [ "$PRETTY_PRINT" = "1" ]; then
+		echo "{\"success\" : true, \"session_id\" : $SESSION_ID, \"result\" : $output}" | python -mjson.tool
+	else
+		echo "{\"success\" : true, \"session_id\" : $SESSION_ID, \"result\" : $output}"
+	fi
+	#clean_up
+	exit 0
+}
+
+
+function error_exit 
+{
+	#####	
+	# 	Function for exit due to fatal program error
+	# 	Accepts 1 argument
+	#		string containing descriptive error message
+	#####
+
+	local err_msg=$(json_escape "$1")
+	
+	if [ "$PRETTY_PRINT" = "1" ]; then
+		echo "{\"success\" : false, \"err_msg\" : $err_msg}" | python -mjson.tool 
+	else
+		echo "{success : false, err_msg : $err_msg}"
+	fi
+	
+	#echo ${err_msg} >&2
+	clean_up
+	exit 1
+}
+
+
+function term_exit
+{
+	#####
+	#	Function to perform exit if termination signal is trapped
+	#	No arguments
+	#####
+	if [ "$PRETTY_PRINT" = 1 ]; then
+		echo "{success : false, err_msg : 'Terminated'}" | python -mjson.tool 
+	else
+		echo "{success : false, err_msg : 'Terminated'}"
+	fi
+	#echo "${PROGNAME}: Terminated"
+	clean_up
+	exit
+}
+
+
+function int_exit
+{
+	#####
+	#	Function to perform exit if interrupt signal is trapped
+	#	No arguments
+	#####
+	if [ "$PRETTY_PRINT" = 1 ]; then
+		echo "{success : false, err_msg : 'Aborted by user'}" | python -mjson.tool 
+	else
+		echo "{success : false, err_msg : 'Aborted by user'}"
+	fi
+	#echo "${PROGNAME}: Aborted by user"
+	clean_up
+	exit
+}
+
+
+function login # – log into SoftNAS and create an active API session
+{
+	
+	local options="--silent --write-out \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n"
+	fi
+	
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data username=${1}&password=${2} $BASE_URL/login.php"
+
+	if [ "$DEBUG" = 1 ]; then
+		echo -e "Command line : "		
+		echo -e "$cmd\n"
+	fi
+
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+	 	set $headers
+    		if [[ "$1" == "302" && "$2" == *"index.php" && "$3" == *"login.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+				graceful_exit "{}"          
+		else
+			error_exit "could not login"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #1"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function logout #– log out of SoftNAS and deactivate the API session
+{
+
+	local options="--silent --write-out \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} $BASE_URL/logout.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+
+	RESULT=$($cmd 2>&1)
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"logout.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			rm $TEMP_FILE
+			rm $TEMP_DATAFILE
+			graceful_exit "{}"
+		else
+			error_exit "An error has occured #2"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #3"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function resetsessiontimer #– for long-running commands, keeps the session from automatically logging out
+{
+	local options="--silent --write-out \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=resetsessiontimer $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+	else
+		error_exit "An error has occured #4"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function licenseinfo #– returns the current license information
+{
+	local options="--silent --write-out \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=licenseinfo $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+
+	RESULT=$($cmd 2>&1)
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		error_exit "An error has occured #5"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+
+function licenseactivate #– activate a license key for use with SoftNAS
+{
+	local options="--silent --write-out \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=licenseactivate&licensekey=$1&regname=$2&hwid=$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		error_exit "An error has occured #5"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function newlicense #– install a new license key to SoftNAS
+{
+	
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&newkey=$1&regnew=$2&activationType=$3&id_activation_code-inputEl=$4 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	#echo $output
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		error_exit "An error has occured #6"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function internallicense #– force SoftNAS to use its built-in, default license
+{
+	
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=internallicense $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function validlicense #– test whether SoftNAS license is valid
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function ackagreement #– acknowledge the license agreement (to enable use of the product)
+{
+		local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=ackagreement $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function checkupdate #– check to see if new software updates are available
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=checkupdate $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function executeupdate #– execute and apply software updates
+{
+		local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=executeupdate $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function statusupdate #– return status of update that is in-progress (started by executeupdate)
+{
+
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=statusupdate $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function availabledisks #– returns list of available disk devices
+{
+		local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=diskdevices $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function pools #– lists available storage pools
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+	
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+		echo $0
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	local start=$1
+	if [ "$start" = "" ]; then
+		start=0
+	fi
+	local limit=$2
+		if [ "$limit" = "" ]; then
+		limit=999
+	fi
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&start=$start&limit=$limit $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function pooldetails #– list a storage pool’s detailed attributes
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&pool_name=$1 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function poolcommand #– issue a command to control a storage pool
+{
+		local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&command=$1&pool_name=$2&device=$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function createpool #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&selectedItems=$1&pool_name=$2&raid_abbr=$3&forcedCreation=$4 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function editpool #- 
+{
+ 	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function deletepool #– 
+{
+		local options="-X DELETE --silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data {\"opcode\":\"${FUNCNAME[0]}\",\"pool_name\":"$(json_escape $1)"} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function expandpool #– 
+{
+		local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&selectedItems=$1&pool_name=$2&raid_abbr=$3&forcedCreation=$4 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function importpool #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&arguments=$1 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function readcache #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&selectedItems=$1&pool_name=$2&forcedCache=$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function writelog #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&selectedItems=$1&pool_name=$2&raid_abbr=$3&forcedLog=$4 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function addspare #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&selectedItems=$1&pool_name=$2&forcedSpare=$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function volumes #– list available storage volumes
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&start=$1&limit=$2 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function createvolume #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+	local parms=
+	local args=
+	while [ "$1" != "" ]; do
+			
+			case $1 in
+				"reserve_space="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&reserve_space=$value"
+					shift
+					;;
+				"reserve_units="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&reserve_units=$value"
+					shift
+					;;
+				"enable_snapshot="* )
+					parms+="&cbSnapshotEnabled=on"
+					shift
+					;;
+				"schedule_name="*)
+					parms+="&schedule_name=on"
+					shift
+					;;
+				"hourlysnaps="*)
+					parms+="&hourlysnaps=on"
+					shift
+					;;
+				"dailysnaps="*)
+					parms+="&dailysnaps=on"
+					shift
+					;;
+				"weeklysnaps="*)
+					parms+="&weeklysnaps=on"
+					shift
+					;;
+				"compression="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&compression=$value"
+					shift
+					;;
+				"dedup="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&dedup=$value"
+					shift
+					;;
+				"shareISCSI="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&shareISCSI=$value"
+					shift
+					;;
+				"shareCIFS="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&shareCIFS=$value"
+					shift
+					;;
+				"exportNFS="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&exportNFS=$value"
+					shift
+					;;
+				
+				* )
+					args+=" $1"
+					shift
+					;;
+			esac
+	done
+	set $args
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&vol_name=$1&pool=$2&vol_type=$3&provisioning=$4$parms $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+#exit
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function editvolume #– 
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+	local parms=
+	local args=
+	while [ "$1" != "" ]; do
+			
+			case $1 in
+				"reserve_space="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&reserve_space=$value"
+					shift
+					;;
+				"reserve_units="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&reserve_units=$value"
+					shift
+					;;
+				"enable_snapshot="* )
+					parms+="&cbSnapshotEnabled=on"
+					shift
+					;;
+				"schedule_name="*)
+					parms+="&schedule_name=on"
+					shift
+					;;
+				"hourlysnaps="*)
+					parms+="&hourlysnaps=on"
+					shift
+					;;
+				"dailysnaps="*)
+					parms+="&dailysnaps=on"
+					shift
+					;;
+				"weeklysnaps="*)
+					parms+="&weeklysnaps=on"
+					shift
+					;;
+				"compression="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&compression=$value"
+					shift
+					;;
+				"dedup="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&dedup=$value"
+					shift
+					;;
+				"shareISCSI="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&shareISCSI=$value"
+					shift
+					;;
+				"shareCIFS="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&shareCIFS=$value"
+					shift
+					;;
+				"exportNFS="* )
+					local value=$(echo ${1:2} | cut -d '=' -f 2)
+					parms+="&exportNFS=$value"
+					shift
+					;;
+				
+				* )
+					args+=" $1"
+					shift
+					;;
+			esac
+	done
+	set $args
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&vol_name=$1&pool=$2&vol_type=$3&provisioning=$4$parms $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function deletevolume #– 
+{
+	local options="-X DELETE --silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data {\"opcode\":\"${FUNCNAME[0]}\",\"vol_name\":"$(json_escape $1)",\"pool\":"$(json_escape $2)"} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	#set +x
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function schedulelist #– list available schedules
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function schedulecommand #– issue a schedule control command
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&command=$1&schedule_name=$2& $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+p
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function snapshotlist #– list available snapshots
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&pool_name=$1&start=$2&limit=$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function snapcommand #– issue a snapshot control command
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&command=$1&pool_name=$2&volume_name$3&snap_name=$4 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function iscsitargetlist #– list of available iSCSI targets
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&start=$1&limit=$2&$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function iscsicommand #– issue an iSCSI control command
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function diskdevices #– list of available disk devices and their status
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function diskmgmt #– issue a disk management command
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function parted_command #– issue a disk partitioning command
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]}&command=$1&operand1=$2&operand2=$3 $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function snaprepcommand #– SnapReplicate™ command
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function perfmon #– get performance monitoring status information
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function overview #– get NAS overview status information
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function netstats #– get network performance status information
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function diskstats #– get disk performance status information
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function procarcstatus #– get processor and cache status information
+{
+	local options="--silent --write-out  \n%{http_code}\t%{redirect_url}\t%{url_effective}"
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 begin ------------------------------------\n\n"
+	fi
+
+	if [ "$INSECURE" = 1 ]; then
+		options="$options -k"
+	fi
+	
+	cmd="curl $options --cookie ${TEMP_FILE} --cookie-jar ${TEMP_FILE} --data opcode=${FUNCNAME[ 0 ]} $BASE_URL/snserver/snserv.php"
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "$cmd\n\n"
+	fi
+
+	#set -x
+	RESULT=$($cmd 2>&1)
+	
+	if [ "$?" = "0" ]; then
+		local headers=$(echo "$RESULT" | tail -1)
+		set $headers
+		if [[ "$1" == "302" && "$2" == *"login.php" && "$3" == *"snserver/snserv.php" ]]; then # && "$2" == "*index.php" && "$3" == "*login.php" ]]; then
+			error_exit "You are not logged"
+		else
+			local output=$(echo "$RESULT" | head -n -1)
+			graceful_exit "$output"
+		fi
+
+	else
+		local output=$(echo "$RESULT" | head -n -1)
+		error_exit "An error has occured #7 $output"
+	fi
+	#set +x
+
+	if [ "$DEBUG" = 1 ]; then
+		 echo -e "------------------------------------ function $0 end ------------------------------------\n\n"
+	fi
+}
+
+
+function make_temp_files
+{
+
+#	-----------------------------------------------------------------------
+#	Function to create temporary files
+#		No arguments
+#	-----------------------------------------------------------------------
+
+	# Use user's local tmp directory if it exists
+
+	# Temp file for this script, using paranoid method of creation to
+	# insure that file name is not predictable.  This is for security to
+	# avoid "tmp race" attacks.  If more files are needed, create using
+	# the same form.
+	
+	
+	if [ ! -e $TEMP_FILE ]; then
+		local var=$(mktemp)
+		mv $var $TEMP_FILE
+		#TEMP_FILE=$(mktemp -q $TEMP_FILE)
+	fi
+	if [ "$?" != "0" ] || [ ! -e $TEMP_FILE ]; then
+		error_exit "error : ${TEMP_FILE}" 
+	fi
+
+	if [ ! -e $TEMP_DATAFILE ]; then
+		local var=$(mktemp)
+		mv $var $TEMP_DATAFILE
+		#TEMP_DATAFILE=$(mktemp -q $TEMP_DATAFILE)
+	fi
+	
+	if [ "$?" != "0" ] || [ ! -e $TEMP_DATAFILE ]; then
+		error_exit "error : ${TEMP_DATAFILE}" 
+	fi
+
+	
+}
+
+
+
+#
+count=0
+set_base_url=0
+options=
+while [ "$1" != "" ]; do
+
+	case $1 in
+	    -m | --method )
+			method=$2
+			shift 2
+			;;
+		-u | --username ) 	
+			username=$2
+			shift 2
+			;;
+
+		-p | --password )
+			password=$2
+			shift
+			;;
+
+		-b | --base_url )
+			BASE_URL=$2
+			set_base_url=1
+			shift 2
+			;;
+
+		-s | --session_id )
+			SESSION_ID=$2
+			if [ "$SESSION_ID" != "" ]; then
+				TEMP_FILE="/tmp/softnascmd.${SESSION_ID}"
+				TEMP_DATAFILE="/tmp/softnascmd.${SESSION_ID}.data"
+			else
+				error_exit "Invalid session id"
+			fi
+
+			shift 2
+			;;
+
+		-i | --insecure )
+			INSECURE=1
+			shift
+			;;
+
+		-t | --pretty_print )
+			PRETTY_PRINT=1
+			shift
+			;;
+
+	    -h | --help )
+			#usage
+			exit
+			;;
+	    * )
+			options+=" $1"
+			shift
+			;;
+	esac
+
+done
+
+set $options
+
+#if [ "$1" != "login" ] && [ "$SESSION_ID" = "" ]; then
+#	error_exit "You must provide session id"
+#fi
+if [ "$1" != "login" ] && [ ! -e $TEMP_FILE ]; then
+	error_exit "you are not logged in"
+fi
+
+make_temp_files
+
+count_lines=$(cat $TEMP_DATAFILE | wc -c)
+if [ $count_lines -gt 0 ]; then 
+	if [ "$set_base_url" = "1" ]; then
+		replacement=$(echo $BASE_URL | sed -e 's/[]\/()$*.^|[]/\\&/g')
+		sed -i "1s/.*/$replacement/" $TEMP_DATAFILE
+	else
+		BASE_URL=$(cat $TEMP_DATAFILE | head -1)
+	fi
+else
+	#echo $BASE_URL
+	echo $BASE_URL >> $TEMP_DATAFILE
+fi
+
+
+case $1 in
+	    login  )
+			shift
+			login $*
+			;;
+
+		logout )
+			shift
+			logout $*
+			;;
+
+		resetsessiontimer )
+			shift
+			resetsessiontimer $*
+			;;
+
+		licenseinfo )
+			shift
+			licenseinfo $*
+			;;
+
+		licenseactivate ) 
+			shift
+			licenseactivate $*
+			;;
+		internallicense )
+			shift
+			internallicense $*
+			;;
+		validlicense )
+			shift
+			validlicense $*
+		;;
+		ackagreement )
+			shift
+			ackagreement $*
+		;;
+		checkupdate )
+			shift
+			checkupdate $*
+		;;
+		executeupdate )
+			shift
+			executeupdate $*
+		;;
+		statusupdate )
+			shift
+			statusupdate $*
+		;;
+			newlicense| availabledisks | pools | pooldetails | poolcommand | editpool | deletepool | \
+			volumes | createvolume | editvolume | deletevolume | schedulelist | schedulecommand | \
+			snapshotlist | snapcommand | iscsitargetlist | iscsicommand | diskdevices | diskmgmt | parted_command | snaprepcommand | \
+			perfmon | overview | netstats | diskstats | procarcstatus | availabledisks )
+			command=$1
+			shift 
+			$command $*
+		;;
+		createpool | expandpool | readcache | writelog | addspare)
+			command=$1
+			shift
+	
+			selected_items=$(echo $1 | tr ":" "\n")
+			json_items=
+			for i in $selected_items; do
+				if [ "$json_items" = "" ]; then
+					json_items="{\"disk_name\":"$(json_escape $i)"}"
+				else
+					json_items="$json_items,{\"disk_name\":"$(json_escape $i)"}"
+				fi
+			done
+			shift 
+
+			$command "[$json_items]" $*
+
+			;;
+		importpool )
+			command=$1
+			shift
+			arguments="{\"poolName\":"$(json_escape $1)",\"poolType\":"$(json_escape $2)",\"force\":\"$3\"}"
+			$command $arguments
+		;;
+	    -h | --help )           #usage
+	                            exit
+	                            ;;
+	    * )                     #usage
+	                            exit 1
+	esac
+
+
+
+#result=$($cmd)
+#echo $result;
+
+#cmd=" --data \"username=${username}softnas&password=${password}\" ${url}"

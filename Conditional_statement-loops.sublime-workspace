@@ -1,0 +1,239 @@
+{
+	"auto_complete":
+	{
+		"selected_items":
+		[
+			[
+				"date",
+				"datetime"
+			],
+			[
+				"func",
+				"func2"
+			],
+			[
+				"da",
+				"data1"
+			],
+			[
+				"he",
+				"hello_world"
+			],
+			[
+				"st",
+				"stdout"
+			],
+			[
+				"in",
+				"install"
+			],
+			[
+				"she",
+				"shell_echo"
+			],
+			[
+				"M",
+				"Mercury"
+			]
+		]
+	},
+	"buffers":
+	[
+	],
+	"build_system": "",
+	"build_system_choices":
+	[
+	],
+	"build_varint": "",
+	"command_palette":
+	{
+		"height": 882.0,
+		"last_filter": "package",
+		"selected_items":
+		[
+			[
+				"package",
+				"Package Control: Install Package"
+			]
+		],
+		"width": 949.0
+	},
+	"console":
+	{
+		"height": 0.0,
+		"history":
+		[
+		]
+	},
+	"distraction_free":
+	{
+		"menu_visible": true,
+		"show_minimap": false,
+		"show_open_files": false,
+		"show_tabs": false,
+		"side_bar_visible": false,
+		"status_bar_visible": false
+	},
+	"file_history":
+	[
+		"/C/Users/jibby/AppData/Roaming/Sublime Text 3/Packages/Terminal/Terminal.sublime-settings",
+		"/D/vagrant/centos7/python/Conditional_statement-loops.py",
+		"/E/Aconex/bucketpolicy-2.json",
+		"/E/Aconex/iampolicy-acxsync",
+		"/E/Aconex/python/sts_assume_role.py",
+		"/E/Aconex/python/iampolicy.py",
+		"/E/Aconex/iampolicy-acxsync-2",
+		"/E/Aconex/sts_assumerole_ec2.json",
+		"/D/Downloads-Jibby/policy (1).json",
+		"/D/Downloads-Jibby/policy.json",
+		"/D/vagrant/centos7/python/s3read.py",
+		"/D/vagrant/centos7/python/policy.json",
+		"/D/vagrant/centos7/python/test.json",
+		"/D/vagrant/centos7/terraform/tfvar_examples",
+		"/D/vagrant/centos7/terraform/reposerver/scripts/repo.conf",
+		"/D/vagrant/centos7/terraform/reposerver/repo-v2.tf",
+		"/D/vagrant/centos7/terraform/reposerver/repo.orig",
+		"/D/vagrant/centos7/terraform/reposerver/install.sh",
+		"/D/vagrant/centos7/terraform/install.sh",
+		"/D/vagrant/centos7/terraform/reposerver/data.tf",
+		"/D/vagrant/centos7/terraform/reposerver/cloud_init.tpl",
+		"/D/vagrant/centos7/terraform/vpc.tf",
+		"/D/vagrant/centos7/terraform/reposerver/variables.tf",
+		"/D/vagrant/centos7/terraform/reposerver/main.tf",
+		"/D/vagrant/centos7/terraform/provider.tf",
+		"/D/vagrant/centos7/terraform/awsvpc.tf",
+		"/D/vagrant/centos7/python/ex2.py",
+		"/D/vagrant/centos7/python/function1.py",
+		"/D/vagrant/centos7/python/ex1.py",
+		"/D/vagrant/centos7/python/fruit.py",
+		"/D/vagrant/centos7/terraform/awsbuild.tf",
+		"/D/vagrant/centos7/terraform/main.tf",
+		"/D/Documents-Jibby/01 - Jibby - HowTo/How To - Ubuntu - setup",
+		"/D/Documents-Jibby/01 - Jibby - HowTo/Azure-CLI.ps1",
+		"/D/Documents-Jibby/01 - Jibby - HowTo/Azure-Powershell-Create RG.ps1"
+	],
+	"find":
+	{
+		"height": 43.0
+	},
+	"find_in_files":
+	{
+		"height": 0.0,
+		"where_history":
+		[
+		]
+	},
+	"find_state":
+	{
+		"case_sensitive": false,
+		"find_history":
+		[
+			"dump",
+			"content",
+			"\t\n",
+			"In the next article, we’ll begin setting up our Ansible playbook and provisioning a test system."
+		],
+		"highlight": true,
+		"in_selection": false,
+		"preserve_case": false,
+		"regex": false,
+		"replace_history":
+		[
+		],
+		"reverse": false,
+		"show_context": true,
+		"use_buffer2": true,
+		"whole_word": false,
+		"wrap": true
+	},
+	"groups":
+	[
+		{
+			"sheets":
+			[
+			]
+		}
+	],
+	"incremental_find":
+	{
+		"height": 43.0
+	},
+	"input":
+	{
+		"height": 0.0
+	},
+	"layout":
+	{
+		"cells":
+		[
+			[
+				0,
+				0,
+				1,
+				1
+			]
+		],
+		"cols":
+		[
+			0.0,
+			1.0
+		],
+		"rows":
+		[
+			0.0,
+			1.0
+		]
+	},
+	"menu_visible": true,
+	"output.find_results":
+	{
+		"height": 0.0
+	},
+	"pinned_build_system": "",
+	"project": "Conditional_statement-loops.sublime-project",
+	"replace":
+	{
+		"height": 82.0
+	},
+	"save_all_on_build": true,
+	"select_file":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_project":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"select_symbol":
+	{
+		"height": 0.0,
+		"last_filter": "",
+		"selected_items":
+		[
+		],
+		"width": 0.0
+	},
+	"selected_group": 0,
+	"settings":
+	{
+	},
+	"show_minimap": true,
+	"show_open_files": false,
+	"show_tabs": true,
+	"side_bar_visible": true,
+	"side_bar_width": 375.0,
+	"status_bar_visible": true,
+	"template_settings":
+	{
+	}
+}
